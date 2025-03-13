@@ -28,20 +28,21 @@ routes = web.RouteTableDef()
 class_cache = {}
 fileHolder = {}
 
-# ✅ Dynamic thread allocation based on CPU load
+# ✅ Dynamically allocate threads based on CPU load
 def get_optimal_threads():
     load = psutil.cpu_percent()
-    return min(max(10, int(60 - load / 2)), 60)  # Adjust dynamically between 10 and 60 threads
+    return min(max(10, int(60 - load / 2)), 60)  # Dynamically adjust between 10 and 60 threads
 
-# ✅ Adaptive chunk size based on network speed
+# ✅ Adjust chunk size based on network speed
 def get_optimal_chunk_size():
     st = speedtest.Speedtest()
+    st.get_best_server()  # Get the best server based on ping
     download_speed = st.download() / 1e6  # Convert to Mbps
     if download_speed > 50:
-        return 512 * 1024  # 512 KB
+        return 512 * 1024  # 512 KB for fast connections
     elif download_speed > 10:
-        return 256 * 1024  # 256 KB
-    return 128 * 1024  # 128 KB for slow connections
+        return 256 * 1024  # 256 KB for moderate connections
+    return 128 * 1024  # 128 KB for slower connections
 
 @routes.get("/", allow_head=True)
 async def root_route_handler(_):
@@ -87,8 +88,8 @@ async def __stream_handler(request: web.Request, thumb=False):
         raise web.HTTPInternalServerError(text=str(e))
 
 async def yield_complete_part(part_count, channel_id, message_id, offset, chunk_size):
-    """Efficiently yields file parts using dynamic threading."""
-    threads = get_optimal_threads()
+    """Efficiently yields file parts with dynamic threading."""
+    threads = get_optimal_threads()  # Get optimal threads based on load
     clients = cycle(multi_clients.values())
     tasks = {}
 
@@ -99,26 +100,33 @@ async def yield_complete_part(part_count, channel_id, message_id, offset, chunk_
         )
         offset += chunk_size
 
-        if len(tasks) >= threads:
+        if len(tasks) >= threads:  # Limit concurrent tasks to prevent overwhelming the system
             done, _ = await asyncio.wait(tasks.values(), return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 yield task.result()[1]
                 tasks = {k: v for k, v in tasks.items() if v not in done}
 
+    # Wait for remaining tasks if any
     for task in tasks.values():
         yield (await task)[1]
 
 async def yield_files(client, channel_id, message_id, current_part, offset, chunk_size):
-    """Fetch file chunks efficiently using available Telegram client."""
+    """Fetch file chunks and handle rate limiting."""
     streamer = class_cache.setdefault(client, utils.ByteStreamer(client))
 
     file_id = await streamer.generate_file_properties(channel_id, message_id, thumb=False)
     media_session = await streamer.generate_media_session(client, file_id)
     location = await streamer.get_location(file_id)
 
-    response = await media_session.invoke(
-        raw.functions.upload.GetFile(location=location, offset=offset, limit=chunk_size)
-    )
+    # Introduce a backoff to prevent overwhelming the Telegram API
+    try:
+        response = await media_session.invoke(
+            raw.functions.upload.GetFile(location=location, offset=offset, limit=chunk_size)
+        )
+    except Exception as e:
+        logger.warning(f"Error fetching file part {current_part}: {e}")
+        await asyncio.sleep(2)  # Sleep for a short time to prevent overwhelming the API
+        return await yield_files(client, channel_id, message_id, current_part, offset, chunk_size)
 
     return current_part, response.bytes if isinstance(response, raw.types.upload.File) else b""
 
@@ -129,13 +137,15 @@ async def media_streamer(request: web.Request, channel: Union[str, int], message
     range_header = request.headers.get("Range")
     class_cache.setdefault(0, utils.ByteStreamer(bot))
 
-    index = min(work_loads, key=work_loads.get)  # Pick the least active client
+    # Pick the least loaded client for streaming
+    index = min(work_loads, key=work_loads.get)
     faster_client = multi_clients[index]
     tg_connect = class_cache.setdefault(faster_client, utils.ByteStreamer(faster_client))
 
     file_id = await tg_connect.get_file_properties(channel, message_id, thumb)
     file_size = file_id.file_size
 
+    # Handle range headers for partial downloads
     from_bytes, until_bytes = 0, file_size - 1
     if range_header:
         match = re.match(r"bytes=(\d+)-(\d*)", range_header)
