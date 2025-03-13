@@ -73,21 +73,21 @@ async def download_handler(request: web.Request):
         raise web.HTTPForbidden(text="Missing token")
 
     file_id = validate_download_token(token)
-    return await stream_file(request, file_id)
+    return await media_streamer(request, None, None, False, file_id)
 
-async def stream_file(request: web.Request, file_id: str):
-    """Securely streams a file from Telegram."""
+async def media_streamer(request: web.Request, channel: Union[str, int], message_id: int, thumb: bool = False, file_id: str = None):
+    """Handles secure media streaming from Telegram."""
     from tclient import tgclient as bot
 
     range_header = request.headers.get("Range")
     class_cache.setdefault(0, utils.ByteStreamer(bot))
 
-    index = min(work_loads, key=work_loads.get)  # Pick least loaded bot
+    index = min(work_loads, key=work_loads.get)
     client = multi_clients[index]
-    streamer = class_cache.setdefault(client, utils.ByteStreamer(client))
+    tg_connect = class_cache.setdefault(client, utils.ByteStreamer(client))
 
-    file_properties = await streamer.get_file_properties(None, None, file_id=file_id)
-    file_size = file_properties.file_size
+    file_id = await tg_connect.get_file_properties(channel, message_id, thumb, file_id)
+    file_size = file_id.file_size
 
     from_bytes, until_bytes = 0, file_size - 1
     if range_header:
@@ -101,9 +101,9 @@ async def stream_file(request: web.Request, file_id: str):
 
     chunk_size = 1024 * 1024
     offset = from_bytes - (from_bytes % chunk_size)
-    body = yield_complete_part(math.ceil(until_bytes / chunk_size) - math.floor(offset / chunk_size), None, None, offset, chunk_size)
+    body = yield_complete_part(math.ceil(until_bytes / chunk_size) - math.floor(offset / chunk_size), channel, message_id, offset, chunk_size)
     
-    mime_type = file_properties.mime_type or mimetypes.guess_type(utils.get_name(file_properties))[0] or "application/octet-stream"
+    mime_type = file_id.mime_type or mimetypes.guess_type(utils.get_name(file_id))[0] or "application/octet-stream"
     disposition = "inline" if "video/" in mime_type or "audio/" in mime_type else "attachment"
 
     return web.Response(
@@ -113,7 +113,7 @@ async def stream_file(request: web.Request, file_id: str):
             "Content-Type": mime_type,
             "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
             "Content-Length": str(until_bytes - from_bytes + 1),
-            "Content-Disposition": f'{disposition}; filename="{utils.get_name(file_properties)}"',
+            "Content-Disposition": f'{disposition}; filename="{utils.get_name(file_id)}"',
             "Accept-Ranges": "bytes",
         },
     )
