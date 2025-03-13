@@ -15,7 +15,7 @@ aniparse
 pytz
 guessit
 rapidfuzz
-pyrogram
+pyrofork
 bs4
 requests
 apscheduler
