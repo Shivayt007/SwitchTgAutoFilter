@@ -1,30 +1,3 @@
-# Taken from megadlbot_oss <https://github.com/eyaadh/megadlbot_oss/blob/master/mega/webserver/routes.py>
-# Thanks to Eyaadh <https://github.com/eyaadh>
-
-import pyrogram
-import re
-import time, asyncio, json
-import math
-from asyncio import Queue
-import logging
-from random import choice
-from streamer import utils
-from pyrogram import raw
-from os import getenv
-import mimetypes
-from aiohttp.web import Request
-from typing import Union
-from aiohttp import web
-from aiohttp.http_exceptions import BadStatusLine
-from base64 import b16decode
-from streamer.exceptions import *
-from streamer.utils.constants import work_loads, multi_clients
-from database.ia_filterdb import get_file_details, decode_file_ref
-
-from pyrogram.file_id import FileId
-
-logger = logging.getLogger("routes")
-StartTime = time.time()
 import asyncio
 import json
 import logging
@@ -32,21 +5,21 @@ import math
 import mimetypes
 import time
 import re
+import psutil
+import speedtest
 from os import getenv
 from random import choice
 from itertools import cycle
 from typing import Union
 from base64 import b16decode
-
 from aiohttp import web
 from aiohttp.web import Request
 from pyrogram import raw
-from pyrogram.file_id import FileId
-
 from streamer import utils
 from streamer.exceptions import InvalidHash, FIleNotFound
 from streamer.utils.constants import work_loads, multi_clients
 from database.ia_filterdb import get_file_details, decode_file_ref
+from pyrogram.file_id import FileId
 
 logger = logging.getLogger("routes")
 StartTime = time.time()
@@ -55,6 +28,20 @@ routes = web.RouteTableDef()
 class_cache = {}
 fileHolder = {}
 
+# ✅ Dynamic thread allocation based on CPU load
+def get_optimal_threads():
+    load = psutil.cpu_percent()
+    return min(max(10, int(60 - load / 2)), 60)  # Adjust dynamically between 10 and 60 threads
+
+# ✅ Adaptive chunk size based on network speed
+def get_optimal_chunk_size():
+    st = speedtest.Speedtest()
+    download_speed = st.download() / 1e6  # Convert to Mbps
+    if download_speed > 50:
+        return 512 * 1024  # 512 KB
+    elif download_speed > 10:
+        return 256 * 1024  # 256 KB
+    return 128 * 1024  # 128 KB for slow connections
 
 @routes.get("/", allow_head=True)
 async def root_route_handler(_):
@@ -66,16 +53,13 @@ async def root_route_handler(_):
         }
     )
 
-
 @routes.get(r"/stream", allow_head=True)
 async def stream_handler(request: web.Request):
     return await __stream_handler(request)
 
-
 @routes.get(r"/thumb", allow_head=True)
-async def stream_handler(request: web.Request):
+async def thumb_handler(request: web.Request):
     return await __stream_handler(request, True)
-
 
 async def __stream_handler(request: web.Request, thumb=False):
     """Handles media streaming requests."""
@@ -102,9 +86,9 @@ async def __stream_handler(request: web.Request, thumb=False):
         logger.critical(str(e), exc_info=True)
         raise web.HTTPInternalServerError(text=str(e))
 
-
-async def yield_complete_part(part_count, channel_id, message_id, offset, chunk_size, threads: int = 20):
-    """Efficiently yields file parts using concurrent tasks."""
+async def yield_complete_part(part_count, channel_id, message_id, offset, chunk_size):
+    """Efficiently yields file parts using dynamic threading."""
+    threads = get_optimal_threads()
     clients = cycle(multi_clients.values())
     tasks = {}
 
@@ -124,7 +108,6 @@ async def yield_complete_part(part_count, channel_id, message_id, offset, chunk_
     for task in tasks.values():
         yield (await task)[1]
 
-
 async def yield_files(client, channel_id, message_id, current_part, offset, chunk_size):
     """Fetch file chunks efficiently using available Telegram client."""
     streamer = class_cache.setdefault(client, utils.ByteStreamer(client))
@@ -139,7 +122,6 @@ async def yield_files(client, channel_id, message_id, current_part, offset, chun
 
     return current_part, response.bytes if isinstance(response, raw.types.upload.File) else b""
 
-
 async def media_streamer(request: web.Request, channel: Union[str, int], message_id: int, thumb: bool = False, file_id: str = None):
     """Handles media streaming while optimizing download performance."""
     from tclient import tgclient as bot
@@ -147,7 +129,7 @@ async def media_streamer(request: web.Request, channel: Union[str, int], message
     range_header = request.headers.get("Range")
     class_cache.setdefault(0, utils.ByteStreamer(bot))
 
-    index = min(work_loads, key=work_loads.get)
+    index = min(work_loads, key=work_loads.get)  # Pick the least active client
     faster_client = multi_clients[index]
     tg_connect = class_cache.setdefault(faster_client, utils.ByteStreamer(faster_client))
 
@@ -164,10 +146,8 @@ async def media_streamer(request: web.Request, channel: Union[str, int], message
     if until_bytes >= file_size or from_bytes < 0 or until_bytes < from_bytes:
         return web.Response(status=416, text="416: Range Not Satisfiable")
 
-    chunk_size = 256 * 1024
+    chunk_size = get_optimal_chunk_size()
     offset = from_bytes - (from_bytes % chunk_size)
-    first_part_cut = from_bytes - offset
-    last_part_cut = until_bytes % chunk_size + 1
     part_count = math.ceil(until_bytes / chunk_size) - math.floor(offset / chunk_size)
 
     body = yield_complete_part(part_count, channel, message_id, offset, chunk_size)
@@ -186,14 +166,11 @@ async def media_streamer(request: web.Request, channel: Union[str, int], message
         },
     )
 
-
 APP_AUTH_TOKEN = getenv("APP_AUTH_TOKEN", "")
-
 
 def notVerified(request: Request):
     headers = request.headers
     return APP_AUTH_TOKEN and headers.get("Authorization") != APP_AUTH_TOKEN
-
 
 @routes.get("/messageInfo")
 async def getMessage(request: Request):
@@ -201,20 +178,13 @@ async def getMessage(request: Request):
     if notVerified(request):
         return web.json_response({"ok": False, "message": "UNAUTHORIZED"})
 
-    clients = multi_clients
-    bot = choice(list(clients.values()))
-
+    bot = choice(list(multi_clients.values()))
     channel = request.query.get("channel")
+
     try:
         msgId = int(request.query.get("messageId"))
+        channel = int(channel) if channel.isdigit() else channel
+        message = await bot.get_messages(chat_id=channel, message_ids=msgId)
+        return web.json_response(json.loads(str(message)))
     except ValueError:
         return web.json_response({"ok": False, "message": "INVALID_RESPONSE"})
-
-    try:
-        channel = int(channel)
-    except ValueError:
-        pass
-
-    message = await bot.get_messages(chat_id=channel, message_ids=msgId)
-    return web.json_response(json.loads(str(message)))
-    
