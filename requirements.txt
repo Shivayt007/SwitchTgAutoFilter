@@ -1,6 +1,6 @@
 python-dotenv
 PyYAML
-speedtest
+speedtest-cli
 psutil
 aiosqlite
 IMDbPY
