@@ -1,5 +1,7 @@
 python-dotenv
 PyYAML
+speedtest
+psutil
 aiosqlite
 IMDbPY
 swibots
