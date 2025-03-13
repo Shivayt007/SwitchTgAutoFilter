@@ -103,7 +103,7 @@ async def __stream_handler(request: web.Request, thumb=False):
         raise web.HTTPInternalServerError(text=str(e))
 
 
-async def yield_complete_part(part_count, channel_id, message_id, offset, chunk_size, threads: int = 5):
+async def yield_complete_part(part_count, channel_id, message_id, offset, chunk_size, threads: int = 20):
     """Efficiently yields file parts using concurrent tasks."""
     clients = cycle(multi_clients.values())
     tasks = {}
