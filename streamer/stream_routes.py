@@ -164,7 +164,7 @@ async def media_streamer(request: web.Request, channel: Union[str, int], message
     if until_bytes >= file_size or from_bytes < 0 or until_bytes < from_bytes:
         return web.Response(status=416, text="416: Range Not Satisfiable")
 
-    chunk_size = 10 * 1024 * 1024
+    chunk_size = 1024 * 1024
     offset = from_bytes - (from_bytes % chunk_size)
     first_part_cut = from_bytes - offset
     last_part_cut = until_bytes % chunk_size + 1
